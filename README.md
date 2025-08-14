@@ -13,3 +13,15 @@ This repository contains the project for issuing and building the ecosystem of t
 - GPC Staking and RLUSD Reward System Implementation: Develop a platform where GPC holders can stake their tokens and earn rewards in RLUSD (Ripple's USD-pegged stablecoin), extending GPC's DeFi utility. (Utilizing a hybrid on-chain/off-chain architecture)
 
 This project aims to present new possibilities for Real-World Asset (RWA) tokenization through XRPL's powerful features, promoting the utility and adoption of gold-backed assets within the XRPL ecosystem.
+
+## Token Information
+
+- XRPL Testnet
+  
+  - **RLD**: `rs1BTRfAwp4KpBaPuND8WoESDT3JzQoxUq`
+  
+  - **GPC**: `r4WfXjE9qGrPvRgTWBbp8CT7cb5Ur7iX6Q`
+  
+  - **Swap Pool**: `rQU2LkjttEmWyY56jgmGXZND5yriWihZMW`
+
+  - **Stake Pool**: `r9H4gzDaxtsB41iMYbUDNtLHjCeBZH88kb`
