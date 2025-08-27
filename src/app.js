@@ -11,6 +11,7 @@ import { updateExchangeRate } from './config/exchangeRate.js';
 import { startSwapQueueProcessor, startUnstakeQueueProcessor, startClaimQueueProcessor, updateGpcExchangeRate } from './services/cronService.js';
 import { Mutex } from 'async-mutex';
 import fastifyCaching from '@fastify/caching';
+import { sendDiscordAlarm } from './utils/alert.js';
 
 dotenv.config();
 
@@ -168,6 +169,8 @@ const start = async () => {
 
     await fastify.listen({ port: 3000, host: '0.0.0.0' });
     fastify.log.info('Server started');
+
+    sendDiscordAlarm('INFO', 'Server started');
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);

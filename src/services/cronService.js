@@ -7,10 +7,11 @@
 // =======================================================
 import { sendToken } from './xrplService.js';
 import fetch from 'node-fetch';
+import { sendDiscordAlarm } from '../utils/alert.js';
 
 export const startSwapQueueProcessor = async (fastify) => {
-  // let connection;
-  // let request;
+  let connection;
+  let request;
   try {
     connection = await fastify.mysql.getConnection();
     await connection.beginTransaction();
@@ -72,20 +73,23 @@ export const startSwapQueueProcessor = async (fastify) => {
       );
       fastify.log.info(`Swap request ID: ${request.id} completed successfully.`);
     } else {
-        fastify.log.error(`Swap request ID: ${request.id} failed with error: ${result.result.meta.TransactionResult}`);
+  fastify.log.error(`Swap request ID: ${request.id} failed with error: ${result.result.meta.TransactionResult}`);
+  sendDiscordAlarm('ERROR', `Swap request ID: ${request.id} failed: ${result.result.meta.TransactionResult}`);
         // If token transfer fails, update request status to 'failed'
         await connection.execute(
           "UPDATE `swap_requests` SET `status` = 'failed' WHERE `id` = ?",
           [request.id]
         );
-        fastify.log.error(`Swap request ID: ${request.id} marked as failed.`);
+  fastify.log.error(`Swap request ID: ${request.id} marked as failed.`);
+  sendDiscordAlarm('WARN', `Swap request ID: ${request.id} marked as failed.`);
         // TODO: Send error message to Discord alarm
     }
 
     await connection.commit();
   } catch (error) {
     if (connection) await connection.rollback();
-    fastify.log.error('Error processing swap queue:', error);
+  fastify.log.error('Error processing swap queue:', error);
+  sendDiscordAlarm('ERROR', `Error processing swap queue: ${error.message}`);
     // If failed, update request status to 'failed'
     if (connection && typeof request?.id !== 'undefined') {
       try {
@@ -95,6 +99,7 @@ export const startSwapQueueProcessor = async (fastify) => {
         );
       } catch (dbError) {
         fastify.log.error(`Failed to update swap request ${request.id} to failed status:`, dbError);
+        sendDiscordAlarm('ERROR', `Failed to update swap request ${request.id} to failed status: ${dbError.message}`);
       }
     }
   } finally {
@@ -158,7 +163,8 @@ export const startUnstakeQueueProcessor = async (fastify) => {
       fastify.log.info(`Unstake request ID: ${request.id} completed successfully.`);
     } else {
       const failReason = result?.result?.meta?.TransactionResult || 'Unknown XRPL error';
-      fastify.log.error(`Unstake request ID: ${request.id} failed with error: ${failReason}`);
+  fastify.log.error(`Unstake request ID: ${request.id} failed with error: ${failReason}`);
+  sendDiscordAlarm('ERROR', `Unstake request ID: ${request.id} failed: ${failReason}`);
       await connection.execute(
         "UPDATE `unstake_requests` SET `status` = 'failed', `fail_reason` = ? WHERE `id` = ?",
         [failReason, request.id]
@@ -168,7 +174,8 @@ export const startUnstakeQueueProcessor = async (fastify) => {
     await connection.commit();
   } catch (error) {
     if (connection) await connection.rollback();
-    fastify.log.error('Error processing unstake queue:', error);
+  fastify.log.error('Error processing unstake queue:', error);
+  sendDiscordAlarm('ERROR', `Error processing unstake queue: ${error.message}`);
     // If failed, update request status to 'failed'
     if (connection && typeof request?.id !== 'undefined') {
       try {
@@ -178,6 +185,7 @@ export const startUnstakeQueueProcessor = async (fastify) => {
         );
       } catch (dbError) {
         fastify.log.error(`Failed to update unstake request ${request.id} to failed status:`, dbError);
+        sendDiscordAlarm('ERROR', `Failed to update unstake request ${request.id} to failed status: ${dbError.message}`);
       }
     }
   } finally {
@@ -246,6 +254,7 @@ export const startClaimQueueProcessor = async (fastify) => {
         } else {
             const failReason = result?.result?.meta?.TransactionResult || 'Unknown XRPL error';
             fastify.log.error(`Claim request ID: ${request.id} failed with error: ${failReason}`);
+            sendDiscordAlarm('ERROR', `Claim request ID: ${request.id} failed: ${failReason}`);
             await connection.execute(
                 "UPDATE `claim_requests` SET `status` = 'failed', `fail_reason` = ? WHERE `id` = ?",
                 [failReason, request.id]
@@ -256,6 +265,7 @@ export const startClaimQueueProcessor = async (fastify) => {
     } catch (error) {
         if (connection) await connection.rollback();
         fastify.log.error('Error processing claim queue:', error);
+        sendDiscordAlarm('ERROR', `Error processing claim queue: ${error.message}`);
         // If failed, update request status to 'failed'
         if (connection && typeof request?.id !== 'undefined') {
             try {
@@ -265,6 +275,7 @@ export const startClaimQueueProcessor = async (fastify) => {
                 );
             } catch (dbError) {
                 fastify.log.error(`Failed to update claim request ${request.id} to failed status:`, dbError);
+                sendDiscordAlarm('ERROR', `Failed to update claim request ${request.id} to failed status: ${dbError.message}`);
             }
         }
     } finally {
@@ -306,5 +317,6 @@ export const updateGpcExchangeRate = async (fastify) => {
     fastify.log.info(`GPC price updated: ${price}`);
   } catch (error) {
     fastify.log.error('GPC price cron error:', error);
+    sendDiscordAlarm('ERROR', `GPC price cron error: ${error.message}`);
   }
 };

@@ -12,7 +12,7 @@ export default async function (fastify, opts) {
     }
 
     // Apply cache key per account
-    reply.caching({ key: `claimable:${account}`, expiresIn: 60 * 1000 }); // 1 minute cache
+    // reply.caching({ key: `claimable:${account}`, expiresIn: 60 * 1000 }); // 1 minute cache
 
     const amount = await getUserAccumulatedReward(fastify, account);
     return { claimable: amount };

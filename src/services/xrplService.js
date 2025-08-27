@@ -11,6 +11,7 @@
 
 import { Client, Wallet, xrpToDrops, dropsToXrp, isValidAddress } from 'xrpl';
 import { handleSwapPayment, handleStakePayment } from './transactionHandler.js';
+import { sendDiscordAlarm } from '../utils/alert.js';
 
 const DEV_RLD_ISSUER = "rs1BTRfAwp4KpBaPuND8WoESDT3JzQoxUq"; // RLD issuer address for development
 const RLUSD_ISSUER = "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De"; // RLUSD issuer address
@@ -33,14 +34,22 @@ export const connectXrpl = async () => {
   
   client.on('error', (errorCode, errorMessage) => {
     console.error(`XRPL client error: ${errorCode} - ${errorMessage}`);
+    sendDiscordAlarm('ERROR', `XRPL client error: ${errorCode} - ${errorMessage}`);
   });
   console.log('Connecting to XRPL...');
-  await client.connect();
-  console.log('XRPL connected.');
+  try {
+    await client.connect();
+    console.log('XRPL connected.');
+  } catch (err) {
+    console.error('Failed to connect to XRPL:', err);
+    sendDiscordAlarm('ERROR', `Failed to connect to XRPL: ${err.message}`);
+    throw err;
+  }
 };
 
 export const getXrplClient = () => {
   if (!client || !client.isConnected()) {
+    sendDiscordAlarm('ERROR', 'XRPL client is not connected.');
     throw new Error('XRPL client is not connected.');
   }
   return client;
@@ -68,6 +77,7 @@ export const startXrplListener = async (fastify) => {
     console.log('Successfully subscribed to accounts:', response);
   } catch(error) {
     console.error('Failed to subscribe:', error);
+    sendDiscordAlarm('ERROR', `Failed to subscribe to XRPL accounts: ${error.message}`);
     return;
   }
   
@@ -142,6 +152,7 @@ export const checkTrustLine = async (account, currencyCode, issuerAddress) => {
     );
   } catch (error) {
     console.error(`Error checking trust line for ${account}:`, error);
+    sendDiscordAlarm('ERROR', `Error checking trust line for ${account}: ${error.message}`);
     return false;
   }
 };
@@ -157,6 +168,7 @@ export const checkTrustLine = async (account, currencyCode, issuerAddress) => {
  */
 export const sendToken = async (secret, destination, currencyCode, issuerAddress, value) => {
   if (!client || !client.isConnected()) {
+    sendDiscordAlarm('ERROR', 'XRPL client is not connected. Trying to reconnect...');
     await connectXrpl();
   }
   const wallet = Wallet.fromSeed(secret);
@@ -172,16 +184,20 @@ export const sendToken = async (secret, destination, currencyCode, issuerAddress
     },
   };
 
-  const prepared = await client.autofill(paymentTx);
-  const signed = wallet.sign(prepared);
-  console.log(`Sending ${value} ${currencyCode} to ${destination}...`);
-  const result = await client.submitAndWait(signed.tx_blob);
-  
-  // console.log('Transaction result:', result);
-  // Only print essential info from result as it can be too long.
-  // destination account, symbol, amount, transaction hash
-  console.log(`Transaction result: Sent ${value} ${currencyCode} to ${destination}. Transaction hash: ${result.result.hash}`);
-  return result;
+  try {
+    const prepared = await client.autofill(paymentTx);
+    const signed = wallet.sign(prepared);
+    console.log(`Sending ${value} ${currencyCode} to ${destination}...`);
+    const result = await client.submitAndWait(signed.tx_blob);
+    // Only print essential info from result as it can be too long.
+    // destination account, symbol, amount, transaction hash
+    console.log(`Transaction result: Sent ${value} ${currencyCode} to ${destination}. Transaction hash: ${result.result.hash}`);
+    return result;
+  } catch (err) {
+    console.error(`Failed to send token: ${err}`);
+    sendDiscordAlarm('ERROR', `Failed to send token: ${err.message}`);
+    throw err;
+  }
 };
 
 /**
@@ -212,7 +228,14 @@ export const recoverMissedTransactions = async (fastify, options = {}) => {
         limit: Math.min(20, limit - fetched),
       };
       if (marker) req.marker = marker;
-      const resp = await client.request(req);
+      let resp;
+      try {
+        resp = await client.request(req);
+      } catch (err) {
+        console.error(`[recover] Failed to fetch account_tx for ${address}:`, err);
+        sendDiscordAlarm('ERROR', `[recover] Failed to fetch account_tx for ${address}: ${err.message}`);
+        break;
+      }
       const txs = resp.result.transactions;
       if (!txs || txs.length === 0) break;
       for (const txObj of txs) {
@@ -227,10 +250,17 @@ export const recoverMissedTransactions = async (fastify, options = {}) => {
         const txDate = tx.date || txObj.tx_json?.date;
         if (since && txDate && txDate < since) continue;
         // Skip already processed transactions (e.g., check if tx.hash exists in DB)
-        const [rows] = await fastify.mysql.query(
-          'SELECT COUNT(*) AS cnt FROM transactions WHERE tx_hash = ?',
-          [hash]
-        );
+        let rows;
+        try {
+          [rows] = await fastify.mysql.query(
+            'SELECT COUNT(*) AS cnt FROM transactions WHERE tx_hash = ?',
+            [hash]
+          );
+        } catch (err) {
+          console.error(`[recover] DB error while checking tx_hash: ${hash}`, err);
+          sendDiscordAlarm('ERROR', `[recover] DB error while checking tx_hash: ${hash}, ${err.message}`);
+          continue;
+        }
         if (rows[0].cnt > 0) continue;
 
         // Print summary log
@@ -248,6 +278,7 @@ export const recoverMissedTransactions = async (fastify, options = {}) => {
                 console.log(`[recover] SWAP processed successfully: hash=${hash}`);
               } catch (err) {
                 console.error(`[recover] SWAP processing failed: hash=${hash}, error=${err}`);
+                sendDiscordAlarm('ERROR', `[recover] SWAP processing failed: hash=${hash}, error=${err.message}`);
               }
             }
           } else {
@@ -258,6 +289,7 @@ export const recoverMissedTransactions = async (fastify, options = {}) => {
                 console.log(`[recover] SWAP processed successfully: hash=${hash}`);
               } catch (err) {
                 console.error(`[recover] SWAP processing failed: hash=${hash}, error=${err}`);
+                sendDiscordAlarm('ERROR', `[recover] SWAP processing failed: hash=${hash}, error=${err.message}`);
               }
             }
           }
@@ -268,6 +300,7 @@ export const recoverMissedTransactions = async (fastify, options = {}) => {
               console.log(`[recover] SWAP processed successfully: hash=${hash}`);
             } catch (err) {
               console.error(`[recover] SWAP processing failed: hash=${hash}, error=${err}`);
+              sendDiscordAlarm('ERROR', `[recover] SWAP processing failed: hash=${hash}, error=${err.message}`);
             }
           }
         } else if (address === stakeAddress) {
@@ -280,6 +313,7 @@ export const recoverMissedTransactions = async (fastify, options = {}) => {
               console.log(`[recover] STAKE processed successfully: hash=${hash}`);
             } catch (err) {
               console.error(`[recover] STAKE processing failed: hash=${hash}, error=${err}`);
+              sendDiscordAlarm('ERROR', `[recover] STAKE processing failed: hash=${hash}, error=${err.message}`);
             }
           }
         }

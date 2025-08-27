@@ -4,7 +4,9 @@
 // =======================================================
 import { checkTrustLine, sendToken } from './xrplService.js';
 import { getExchangeRate } from '../config/exchangeRate.js';
+import { sendDiscordAlarm } from '../utils/alert.js';
 
+// GPC -> RLUSD 스왑할 때 RLUSD 차감되는 수량: 수수료
 const SWAP_FEE_GPC = 0.05;
 
 export const handleSwapPayment = async (fastify, tx, receivedToken) => {
@@ -72,7 +74,7 @@ export const handleSwapPayment = async (fastify, tx, receivedToken) => {
                     } catch (error) {
                         const msg = `Swap failed for ${userAccount}: ${error}`;
                         console.error(msg);
-                        // TODO: Record failure in DB
+                        sendDiscordAlarm('ERROR', msg);
                         return;
                     }
                 }
@@ -80,7 +82,9 @@ export const handleSwapPayment = async (fastify, tx, receivedToken) => {
         }
         // If swap is not possible: record in swap_requests with status='failed'
         if (failReason) {
-            console.error(`Swap failed: ${failReason} (${userAccount}, ${receivedAmount} ${receivedToken})`);
+            const msg = `Swap failed: ${failReason} (${userAccount}, ${receivedAmount} ${receivedToken})`;
+            console.error(msg);
+            sendDiscordAlarm('WARN', msg);
             const connection = await fastify.mysql.getConnection();
             try {
                 await connection.execute(
@@ -120,7 +124,7 @@ export const handleSwapPayment = async (fastify, tx, receivedToken) => {
             if (exchangeRate <= 0) {
                 failReason = `invalid_exchange_rate`;
             } else {
-                let rlusdToSend = (receivedAmount * exchangeRate) - SWAP_FEE_GPC;
+                let rlusdToSend = (receivedAmount * exchangeRate) - SWAP_FEE_GPC;   // GPC → RLD: 교환비 적용 후 0.05 RLD 수수료 차감
                 rlusdToSend = Math.floor(rlusdToSend * 1e6) / 1e6; // Truncate to 6 decimal places
                 if (rlusdToSend <= 0) {
                     failReason = `amount_too_small`;
@@ -164,6 +168,7 @@ export const handleSwapPayment = async (fastify, tx, receivedToken) => {
                     } catch (error) {
                         const msg = `Swap failed for ${userAccount}: ${error}`;
                         console.error(msg);
+                        sendDiscordAlarm('ERROR', msg);
                         // TODO: Record failure in DB
                         return;
                     }
@@ -172,7 +177,9 @@ export const handleSwapPayment = async (fastify, tx, receivedToken) => {
         }
         // If swap is not possible: record in swap_requests with status='failed'
         if (failReason) {
-            console.error(`Swap failed: ${failReason} (${userAccount}, ${receivedAmount} GPC)`);
+            const msg = `Swap failed: ${failReason} (${userAccount}, ${receivedAmount} GPC)`;
+            console.error(msg);
+            sendDiscordAlarm('WARN', msg);
             const connection = await fastify.mysql.getConnection();
             try {
                 await connection.execute(
@@ -206,6 +213,7 @@ export const handleStakePayment = async (fastify, tx, receivedToken) => {
     if (stakedAmount < 1) {
         const msg = `Stake failed: Amount must be at least 1 GPC.`;
         console.error(msg);
+        sendDiscordAlarm('WARN', msg);
         return;
     }
 
@@ -247,7 +255,9 @@ export const handleStakePayment = async (fastify, tx, receivedToken) => {
         }
         console.log(`Stake recorded: ${userAccount} staked ${stakedAmount} GPC.`);
     } catch (error) {
-        console.error(`Failed to record stake: ${error}`);
+        const msg = `Failed to record stake: ${error}`;
+        console.error(msg);
+        sendDiscordAlarm('ERROR', msg);
     }
 }
 
@@ -258,6 +268,8 @@ export const getUserAccumulatedReward = async (fastify, userAccount) => {
     // 1. Get active reward pool info (add stake_token, reward_token conditions)
     const stakeToken = 'GPC';
     const rewardToken = 'RLUSD';
+    const FIXED_APR = 0.72; // 72% fixed annual interest rate
+
     const [rewardRows] = await fastify.mysql.query(
         `SELECT * FROM reward_info WHERE status = 'active' AND stake_token = ? AND reward_token = ? ORDER BY period_start DESC LIMIT 1`,
         [stakeToken, rewardToken]
@@ -274,74 +286,38 @@ export const getUserAccumulatedReward = async (fastify, userAccount) => {
     const now = Math.floor(Date.now() / 1000);
     const periodStart = Number(reward.period_start);
     const periodEnd = periodStart + (Number(reward.duration) * 86400);
-    // If reward period has not started, no reward; after end, accumulated reward is still shown
-    if (now < periodStart) {
-      console.log('[reward] Reward period not started', { now, periodStart });
-      return 0;
-    }
-    const totalReward = Number(reward.total_reward);
 
-    // 2. Get all users' staking info from stakes table
-    // created_at: first staking
-    // updated_at: updated whenever staking amount changes (deposit/withdrawal)
-    // last_claim_at: updated whenever user claims reward
+    // 2. Get user's staking info
     const [stakeRows] = await fastify.mysql.query(
-        `SELECT xrpl_address, staked_amount, created_at, updated_at, last_claim_at, pocket_reward FROM stakes`
+        `SELECT staked_amount, created_at, updated_at, last_claim_at, pocket_reward FROM stakes WHERE xrpl_address = ?`,
+        [userAccount]
     );
     if (!stakeRows || stakeRows.length === 0) {
-      console.log('[reward] No staking users');
       return 0;
     }
+    const userRow = stakeRows[0];
 
-    // 3. Calculate total staked, user share, user's valid staking period
-    let userRow = null;
-    let totalStaked = 0;
-    for (const row of stakeRows) {
-        totalStaked += Number(row.staked_amount);
-        if (row.xrpl_address === userAccount) userRow = row;
-    }
-    if (!userRow || totalStaked === 0) {
-      console.log('[reward] No user or totalStaked 0', { userRow, totalStaked });
-      return 0;
-    }
-
-    // User's valid staking period: from latest of updated_at, last_claim_at, periodStart to now (within reward period)
-    // last_claim_at may be null/0, so exclude 0
+    // Calculate staking period (seconds)
     const updatedAt = Number(userRow.updated_at) || 0;
     const lastClaimAt = Number(userRow.last_claim_at) || 0;
     const rewardStart = Math.max(updatedAt, lastClaimAt, periodStart);
     const rewardEndForUser = Math.min(now, periodEnd);
     const rewardDuration = Math.max(0, rewardEndForUser - rewardStart);
 
-    // User's share ratio
-    const userShare = Number(userRow.staked_amount) / totalStaked;
-    // Reward allocated to user from total reward
-    const periodTotalSeconds = Number(reward.duration) * 86400;
+    // Calculate reward: staked_amount * (APR / 365 / 86400) * rewardDuration
+    // APR is annual, so daily rate = APR / 365, per second = APR / 365 / 86400
+    const stakedAmount = Number(userRow.staked_amount) || 0;
+    const pocketReward = Number(userRow.pocket_reward || 0);
 
-    // Debug log
-    console.log({
-      updated_at: Number(userRow.updated_at),
-      now,
-      periodStart,
-      periodEnd,
-      rewardStart,
-      rewardEndForUser,
-      rewardDuration,
-      staked_amount: Number(userRow.staked_amount),
-      totalStaked,
-      userShare,
-      totalReward,
-      periodTotalSeconds
-    });
-
-    if (rewardDuration === 0) {
-      console.log('[reward] No valid staking period for user', { rewardDuration, updated_at: Number(userRow.updated_at), now, periodStart, periodEnd });
-      return Number(userRow.pocket_reward || 0);
+    if (rewardDuration === 0 || stakedAmount === 0) {
+      return pocketReward;
     }
 
+    const perSecondRate = FIXED_APR / 365 / 86400;
+    const rewardAccrued = stakedAmount * perSecondRate * rewardDuration;
+
     // Truncate to 6 decimal places before returning
-    const userReward = Number(userRow.pocket_reward || 0) + (totalReward * (rewardDuration / periodTotalSeconds) * userShare);
-    return Math.floor(userReward * 1e6) / 1e6; // Truncate to 6 decimal places
+    return Math.floor((pocketReward + rewardAccrued) * 1e6) / 1e6;
 };
 
 // Reward pool rollover(settlement) function: accumulate unsettled rewards for all users in pocket_reward, change status of existing reward_info to ended
@@ -354,7 +330,10 @@ export const rolloverRewardPool = async (fastify, { type = 'end' } = {}) => {
         `SELECT * FROM reward_info WHERE status = 'active' AND stake_token = ? AND reward_token = ? ORDER BY period_start DESC LIMIT 1`,
         [stakeToken, rewardToken]
     );
-    if (rewardRows.length === 0) throw new Error('No active reward pool');
+    if (rewardRows.length === 0) {
+        sendDiscordAlarm('ERROR', 'No active reward pool');
+        throw new Error('No active reward pool');
+    }
     const reward = rewardRows[0];
     const now = Math.floor(Date.now() / 1000);
 

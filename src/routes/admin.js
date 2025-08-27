@@ -1,4 +1,5 @@
 import { rolloverRewardPool } from '../services/transactionHandler.js';
+import { sendDiscordAlarm } from '../utils/alert.js';
 
 export default async function (fastify, opts) {
   fastify.post('/admin/reward/rollover', async (request, reply) => {
@@ -13,6 +14,7 @@ export default async function (fastify, opts) {
       const result = await rolloverRewardPool(fastify, { type });
       return { success: true, ...result };
     } catch (err) {
+      sendDiscordAlarm('ERROR', `[admin] Rollover failed: ${err.message}`);
       return reply.code(500).send({ error: err.message });
     }
   });
